@@ -1,0 +1,56 @@
+{
+  "name": "perp-trade",
+  "version": "2.3.0",
+  "description": "对冲刷量交易系统 - 在 Paradex 和 Lighter 平台进行零成本对冲交易",
+  "main": "src/index.ts",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "start:testnet": "NODE_ENV=testnet tsx src/index.ts",
+    "start:mainnet": "NODE_ENV=mainnet tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "test:connection:paradex": "tsx scripts/test-paradex.ts",
+    "test:connection:lighter": "tsx scripts/test-lighter.ts",
+    "test:market-order": "tsx scripts/test-market-order.ts",
+    "verify:config": "tsx scripts/verify-config.ts",
+    "monitor:positions": "tsx scripts/monitor-positions.ts",
+    "emergency:close": "tsx scripts/emergency-close.ts",
+    "check:balance": "tsx scripts/check-balance.ts",
+    "report:daily": "tsx scripts/daily-report.ts",
+    "stats:pnl": "tsx scripts/pnl-stats.ts",
+    "generate:jwt": "tsx scripts/generate-paradex-jwt.ts",
+    "derive:starknet": "tsx scripts/derive-starknet-account.ts"
+  },
+  "keywords": [
+    "trading",
+    "hedge",
+    "perpetual",
+    "paradex",
+    "lighter",
+    "market-making"
+  ],
+  "author": "wangzilong",
+  "license": "MIT",
+  "dependencies": {
+    "@paradex/sdk": "^0.6.0",
+    "axios": "^1.7.0",
+    "date-fns": "^3.3.0",
+    "dotenv": "^16.4.0",
+    "ethers": "^6.13.0",
+    "lighter-ts-sdk": "^1.0.0",
+    "starknet": "^5.24.3",
+    "winston": "^3.14.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "eslint": "^9.8.0",
+    "prettier": "^3.3.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  }
+}

@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+.pnpm-debug.log*
+
+# Environment variables
+# .env
+# .env.*
+# !.env.*.example
+
+# Build outputs
+dist/
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PM2
+.pm2/
+ecosystem.config.js
+
+# Database
+*.db
+*.sqlite
+
+# Temporary files
+*.tmp
+.cache/
+
