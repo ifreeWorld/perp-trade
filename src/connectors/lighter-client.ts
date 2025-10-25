@@ -265,11 +265,11 @@ export class LighterClient {
     if (isBuy) {
       // 买入：使用 ask 价格（卖盘最低价）
       price = askPrice > 0 ? askPrice : lastTradePrice;
-      log.debug(`买入使用价格: ask=$${askPrice} (备用: last=$${lastTradePrice})`);
+      log.info(`买入使用价格: ask=$${askPrice} (备用: last=$${lastTradePrice})`);
     } else {
       // 卖出：使用 bid 价格（买盘最高价）
       price = bidPrice > 0 ? bidPrice : lastTradePrice;
-      log.debug(`卖出使用价格: bid=$${bidPrice} (备用: last=$${lastTradePrice})`);
+      log.info(`卖出使用价格: bid=$${bidPrice} (备用: last=$${lastTradePrice})`);
     }
 
     if (price > 0) {
@@ -281,6 +281,129 @@ export class LighterClient {
       `无法获取 ${this.baseSymbol} 的实时价格。` +
         `订单簿返回: ${JSON.stringify(details).substring(0, 200)}`
     );
+  }
+
+  /**
+   * 计算最近一轮的盈亏
+   *
+   * @returns 最近一次开平仓的盈亏（支持多笔订单）
+   */
+  async getLastRoundPnL(): Promise<number> {
+    try {
+      const orders = await this.getAccountOrders(10);
+
+      if (orders.length < 2) {
+        return 0;
+      }
+
+      const { openOrders, closeOrders } = this.groupOrdersBySide(orders);
+
+      if (openOrders.length === 0 || closeOrders.length === 0) {
+        return 0;
+      }
+
+      const openTotalPrice = this.calculatePrice(openOrders);
+      const closeTotalPrice = this.calculatePrice(closeOrders);
+
+      const isOpenBuy =
+        (openOrders[0] as any).side === 'buy' || !(openOrders[0] as any).is_ask;
+      const pnl = isOpenBuy
+        ? closeTotalPrice - openTotalPrice
+        : openTotalPrice - closeTotalPrice;
+
+      log.debug(
+        `Lighter PnL: ${openOrders.length}笔开仓 @ $${openTotalPrice.toFixed(2)}, ` +
+          `${closeOrders.length}笔平仓 @ $${closeTotalPrice.toFixed(2)}, 盈亏=$${pnl.toFixed(4)}`
+      );
+
+      return pnl;
+    } catch (error: any) {
+      log.error('计算 Lighter 盈亏失败', error);
+      return 0;
+    }
+  }
+
+  /**
+   * 按side分组订单（只取最近一对）
+   *
+   * 注意：Lighter的side字段是空字符串，用is_ask判断
+   * 同时用reduce_only区分开平仓可能更准确
+   */
+  private groupOrdersBySide(orders: any[]): { openOrders: any[]; closeOrders: any[] } {
+    const closeOrders: any[] = [];
+    const openOrders: any[] = [];
+
+    // 方法1：通过 reduce_only 分组（更可靠）
+    let foundNonReduceOnly = false;
+
+    for (const order of orders) {
+      const isReduceOnly = (order as any).reduce_only === true;
+
+      if (!foundNonReduceOnly) {
+        if (isReduceOnly) {
+          // reduce_only = true → 平仓订单
+          closeOrders.push(order);
+        } else {
+          // reduce_only = false → 开仓订单
+          foundNonReduceOnly = true;
+          openOrders.push(order);
+        }
+      } else {
+        // 已经找到开仓订单，继续收集
+        const isStillOpen = !(order as any).reduce_only;
+        if (isStillOpen) {
+          openOrders.push(order);
+        } else {
+          // 又遇到平仓订单，停止（只要最近一对）
+          break;
+        }
+      }
+    }
+
+    return { openOrders, closeOrders };
+  }
+
+  /**
+   * 计算加权平均价
+   */
+  private calculatePrice(orders: any[]): number {
+    let totalValue = 0;
+    let totalSize = 0;
+
+    for (const order of orders) {
+      totalValue += parseFloat(order.filled_quote_amount);
+      totalSize += parseFloat(order.filled_base_amount);
+    }
+
+    return totalSize > 0 ? totalValue : 0;
+  }
+
+  /**
+   * 获取账户订单历史
+   *
+   * @param limit - 返回订单数量限制（默认10）
+   */
+  async getAccountOrders(limit: number = 10): Promise<any[]> {
+    try {
+      // ⚠️ getAccountInactiveOrders 需要认证 token
+      const authToken = await this.signer.createAuthTokenWithExpiry(600);
+
+      const response = await this.apiClient.get('/api/v1/accountInactiveOrders', {
+        account_index: this.accountIndex,
+        limit,
+        sort: 'desc',
+        auth: authToken,
+      });
+
+      const orders = response.data.orders || [];
+      log.debug(`查询到 ${orders.length} 个 Lighter 历史订单`);
+
+      return orders;
+    } catch (error: any) {
+      log.error('获取 Lighter 账户订单失败', error);
+      log.error(`错误详情: ${error.message}`);
+      return [];
+    }
   }
 
   /**

@@ -18,12 +18,23 @@ import {
   alertNetPosition,
   alertEmergencyShutdown,
 } from '../utils/telegram-alert.js';
+import { PnLTracker } from '../utils/pnl-tracker.js';
 
 export class HedgeStrategy {
   private paradex: ParadexClient;
   private lighter: LighterClient;
   private config: TradingConfig;
   private isRunning: boolean = false;
+  private pnlTracker: PnLTracker;
+
+  // 用于记录每轮开始时的总盈亏（用于计算增量）
+  private roundStartPnL: {
+    paradex: number;
+    lighter: number;
+  } = {
+    paradex: 0,
+    lighter: 0,
+  };
 
   constructor(
     paradexClient: ParadexClient,
@@ -33,6 +44,7 @@ export class HedgeStrategy {
     this.paradex = paradexClient;
     this.lighter = lighterClient;
     this.config = config;
+    this.pnlTracker = new PnLTracker();
   }
 
   /**
@@ -67,10 +79,10 @@ export class HedgeStrategy {
         roundCount++;
         log.info(`\n--- 第 ${roundCount} 轮交易 ---`);
 
-        // 1. 检查净持仓
+        // 2. 检查净持仓
         await this.checkAndRebalance();
 
-        // 2-4. 开仓
+        // 3-5. 开仓
         await this.openPositions();
 
         // 5. 随机持仓时间
@@ -81,8 +93,8 @@ export class HedgeStrategy {
         log.info(`持仓 ${holdTime} 秒`);
         await sleep(holdTime * 1000);
 
-        // 6. 平仓
-        await this.closePositions();
+        // 6. 平仓（并记录订单ID）
+        await this.closePositions(roundCount);
 
         // 7. 随机间隔时间
         const intervalTime = randomInt(
@@ -138,7 +150,7 @@ export class HedgeStrategy {
 
         const [paradexResult, lighterResult] = await Promise.allSettled([
           this.paradex.createMarketOrder(paradexSide, size),
-          this.lighter.createMarketOrder(lighterSide, size.toString()),
+          this.lighter.createMarketOrder(lighterSide, size.toString(), false), // 开仓 reduceOnly=false
         ]);
 
         // 4. 检查订单提交是否成功
@@ -171,7 +183,7 @@ export class HedgeStrategy {
           await this.handlePartialFill(filled, paradexSide, lighterSide, size);
         }
 
-        // 6. 最终验证对冲成功
+        // 6. 最终验证对冲成功并记录开仓价格
         const positionsAfter = await this.getCurrentPositions();
         const netPosition = positionsAfter.netPosition;
 
@@ -335,7 +347,7 @@ export class HedgeStrategy {
   /**
    * 平仓逻辑（优化版 - 市价单 + 成交验证）
    */
-  async closePositions(): Promise<void> {
+  async closePositions(roundCount: number = 0): Promise<void> {
     const maxRetries = this.config.strategy.maxRetries;
     let attempt = 0;
 
@@ -392,6 +404,10 @@ export class HedgeStrategy {
           Math.abs(positionsAfter.lighterPosition) < 0.001
         ) {
           log.info('✅ 平仓成功');
+
+          // ⚠️ 计算并打印本轮盈亏
+          await this.calculateAndPrintPnL(roundCount);
+
           return;
         }
 
@@ -465,10 +481,44 @@ export class HedgeStrategy {
   }
 
   /**
+   * 计算并打印本轮盈亏
+   *
+   * 简化版：直接调用各 client 的 getLastRoundPnL() 方法
+   */
+  private async calculateAndPrintPnL(roundNumber: number): Promise<void> {
+    try {
+      // 等待API数据更新
+      await sleep(1000);
+
+      // ✅ 直接调用 client 的方法获取盈亏
+      const paradexPnL = await this.paradex.getLastRoundPnL();
+      const lighterPnL = await this.lighter.getLastRoundPnL();
+
+      // 打印盈亏
+      this.pnlTracker.printRoundPnL(roundNumber, paradexPnL, lighterPnL);
+
+      // 发送到Telegram
+    } catch (error: any) {
+      log.error('计算盈亏失败', error);
+      this.pnlTracker.printRoundPnL(roundNumber, 0, 0);
+    }
+  }
+
+  /**
+   * 获取 PnL Tracker
+   */
+  getPnLTracker(): PnLTracker {
+    return this.pnlTracker;
+  }
+
+  /**
    * 停止策略
    */
   stop(): void {
     this.isRunning = false;
     log.info('策略停止');
+
+    // 打印最终盈亏总结
+    this.pnlTracker.printFinalSummary();
   }
 }

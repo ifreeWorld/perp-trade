@@ -12,6 +12,7 @@ import { ParadexPosition, MarketPrice } from '../types/index.js';
 import log from '../utils/logger.js';
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+const TOKEN_REFRESH_BUFFER_MS = 30 * 1000; // Token 过期前 30 秒刷新
 
 interface Account {
   address: string; // Starknet 账户地址
@@ -19,6 +20,7 @@ interface Account {
   privateKey: string; // Starknet 私钥
   ethereumAccount: string; // 以太坊账户地址
   jwtToken?: string;
+  tokenExpiry?: number; // Token 过期时间戳
 }
 
 export class ParadexClient {
@@ -148,21 +150,87 @@ export class ParadexClient {
         throw new Error('JWT Token 获取失败');
       }
 
-      log.info('✅ JWT Token 获取成功');
-
-      // 检查 Token 过期时间
+      // ⚠️ 解析并保存 Token 过期时间
       try {
         const payload = JSON.parse(atob(this.account.jwtToken.split('.')[1]));
+        this.account.tokenExpiry = payload.exp * 1000; // 转换为毫秒
+
+        const expiryDate = new Date(this.account.tokenExpiry);
+        const now = Date.now();
+        const remainingMs = this.account.tokenExpiry - now;
+        const remainingMin = Math.floor(remainingMs / 60000);
+
+        log.info('✅ JWT Token 获取成功');
         log.info(
-          `Token 过期时间: ${new Date(payload.exp * 1000).toLocaleString('zh-CN')}`
+          `Token 过期时间: ${expiryDate.toLocaleString('zh-CN')} (${remainingMin} 分钟后)`
         );
       } catch (e) {
-        // 忽略解析错误
+        log.warn('无法解析 Token 过期时间');
       }
     } catch (error: any) {
       log.error('认证失败', error);
       throw error;
     }
+  }
+
+  /**
+   * 检查并刷新 Token（如果即将过期）
+   */
+  private async ensureTokenValid(): Promise<void> {
+    if (!this.account.tokenExpiry) {
+      // 如果没有过期时间，尝试重新认证
+      await this.authenticate();
+      return;
+    }
+
+    const now = Date.now();
+    const timeUntilExpiry = this.account.tokenExpiry - now;
+
+    // 如果 Token 在 30 秒内过期，重新认证
+    if (timeUntilExpiry < TOKEN_REFRESH_BUFFER_MS) {
+      log.warn(`Token 即将过期（${Math.floor(timeUntilExpiry / 1000)}秒后），刷新中...`);
+      await this.authenticate();
+    }
+  }
+
+  /**
+   * 带 401 自动重试的请求包装器
+   *
+   * @param fn - 需要执行的异步函数
+   * @param maxRetries - 最大重试次数（默认 1 次）
+   */
+  private async withTokenRetry<T>(
+    fn: () => Promise<T>,
+    maxRetries: number = 1
+  ): Promise<T> {
+    let attempt = 0;
+
+    while (attempt <= maxRetries) {
+      try {
+        return await fn();
+      } catch (error: any) {
+        // 检查是否是 401 错误
+        const is401 =
+          error.response?.status === 401 ||
+          error.response?.data?.error === 'INVALID_TOKEN';
+
+        if (is401 && attempt < maxRetries) {
+          attempt++;
+          log.warn(`检测到 401 错误，重新认证并重试（第 ${attempt} 次）...`);
+
+          // 重新认证
+          await this.authenticate();
+
+          // 继续下一次循环重试
+          continue;
+        }
+
+        // 非 401 错误或重试次数用尽，抛出错误
+        throw error;
+      }
+    }
+
+    throw new Error('重试次数用尽');
   }
 
   /**
@@ -361,7 +429,10 @@ export class ParadexClient {
    * 创建市价单
    */
   async createMarketOrder(side: 'buy' | 'sell', size: number): Promise<any> {
-    try {
+    return this.withTokenRetry(async () => {
+      // ⚠️ 确保 Token 有效
+      await this.ensureTokenValid();
+
       const timestamp = Date.now();
 
       const orderDetails = {
@@ -391,17 +462,19 @@ export class ParadexClient {
         Authorization: `Bearer ${this.account.jwtToken}`,
       };
 
-      const response = await this.client.post('/orders', orderBody, { headers });
+      try {
+        const response = await this.client.post('/orders', orderBody, { headers });
 
-      log.info(
-        `✅ Paradex 市价单创建成功: ${response.data.id || response.data.order_id}`
-      );
-      return response.data;
-    } catch (error: any) {
-      log.error(`Paradex 市价单创建失败 (${side} ${size})`, error);
-      log.error(`错误详情: ${JSON.stringify(error.response?.data)}`);
-      throw error;
-    }
+        log.info(
+          `✅ Paradex 市价单创建成功: ${response.data.id || response.data.order_id}`
+        );
+        return response.data;
+      } catch (error: any) {
+        log.error(`Paradex 市价单创建失败 (${side} ${size})`, error);
+        log.error(`错误详情: ${JSON.stringify(error.response?.data)}`);
+        throw error;
+      }
+    });
   }
 
   /**
@@ -412,7 +485,10 @@ export class ParadexClient {
     size: number,
     price: number
   ): Promise<any> {
-    try {
+    return this.withTokenRetry(async () => {
+      // ⚠️ 确保 Token 有效
+      await this.ensureTokenValid();
+
       const timestamp = Date.now();
 
       const orderDetails = {
@@ -436,33 +512,40 @@ export class ParadexClient {
         Authorization: `Bearer ${this.account.jwtToken}`,
       };
 
-      const response = await this.client.post('/orders', orderBody, { headers });
+      try {
+        const response = await this.client.post('/orders', orderBody, { headers });
 
-      log.info(
-        `✅ Paradex 限价单创建成功: ${response.data.id || response.data.order_id}`
-      );
-      return response.data;
-    } catch (error: any) {
-      log.error(`Paradex 限价单创建失败 (${side} ${size} @ ${price})`, error);
-      throw error;
-    }
+        log.info(
+          `✅ Paradex 限价单创建成功: ${response.data.id || response.data.order_id}`
+        );
+        return response.data;
+      } catch (error: any) {
+        log.error(`Paradex 限价单创建失败 (${side} ${size} @ ${price})`, error);
+        throw error; // 抛出错误以便 withTokenRetry 处理
+      }
+    });
   }
 
   /**
    * 获取账户信息（包括持仓）
    */
   async getAccountInfo(): Promise<any> {
-    try {
+    return this.withTokenRetry(async () => {
+      // ⚠️ 确保 Token 有效
+      await this.ensureTokenValid();
+
       const headers = {
         Authorization: `Bearer ${this.account.jwtToken}`,
       };
 
-      const response = await this.client.get('/account', { headers });
-      return response.data;
-    } catch (error: any) {
-      log.error('获取 Paradex 账户信息失败', error);
-      throw error;
-    }
+      try {
+        const response = await this.client.get('/account', { headers });
+        return response.data;
+      } catch (error: any) {
+        log.error('获取 Paradex 账户信息失败', error);
+        throw error; // 抛出错误以便 withTokenRetry 处理
+      }
+    });
   }
 
   /**
@@ -470,6 +553,9 @@ export class ParadexClient {
    */
   async getPositions(): Promise<ParadexPosition[]> {
     try {
+      // ⚠️ 确保 Token 有效
+      await this.ensureTokenValid();
+
       const headers = {
         Authorization: `Bearer ${this.account.jwtToken}`,
       };
@@ -526,6 +612,152 @@ export class ParadexClient {
     log.debug(`${this.symbol} 持仓值: ${size}`);
 
     return size;
+  }
+
+  /**
+   * 计算最近一轮的盈亏
+   *
+   * @returns 最近一次开平仓的盈亏（支持多笔订单）
+   */
+  async getLastRoundPnL(): Promise<number> {
+    try {
+      const orders = await this.getOrderHistory(10);
+
+      if (orders.length < 2) {
+        return 0;
+      }
+
+      const { openOrders, closeOrders } = this.groupOrdersBySide(orders);
+
+      if (openOrders.length === 0 || closeOrders.length === 0) {
+        return 0;
+      }
+
+      const openTotalPrice = this.calculateTotalPrice(openOrders);
+      const closeTotalPrice = this.calculateTotalPrice(closeOrders);
+
+      const isOpenBuy = openOrders[0].side === 'BUY';
+      const pnl = isOpenBuy
+        ? closeTotalPrice - openTotalPrice
+        : openTotalPrice - closeTotalPrice;
+
+      log.debug(
+        `Paradex PnL: ${openOrders.length}笔开仓 @ $${openTotalPrice.toFixed(2)}, ` +
+          `${closeOrders.length}笔平仓 @ $${closeTotalPrice.toFixed(2)}, 盈亏=$${pnl.toFixed(4)}`
+      );
+
+      return pnl;
+    } catch (error: any) {
+      log.error('计算 Paradex 盈亏失败', error);
+      return 0;
+    }
+  }
+
+  /**
+   * 按side方向分组订单（只取最近一对）
+   *
+   * 由于flags实际返回空数组，改用side方向变化来分组：
+   * - 第一组连续同方向 = 平仓组
+   * - 第二组连续同方向 = 开仓组
+   * - 方向再次改变时停止
+   *
+   * 同时验证size是否一致，确保是配对的开平仓
+   */
+  private groupOrdersBySide(orders: any[]): { openOrders: any[]; closeOrders: any[] } {
+    const closeOrders: any[] = [];
+    const openOrders: any[] = [];
+    let currentSide: string | null = null;
+    let groupIndex = 0; // 0=平仓组, 1=开仓组
+
+    for (const order of orders) {
+      const side = order.side; // BUY 或 SELL
+
+      if (groupIndex === 0) {
+        // 收集平仓组（第一组连续同方向）
+        if (currentSide === null) {
+          currentSide = side;
+          closeOrders.push(order);
+        } else if (currentSide === side) {
+          closeOrders.push(order);
+        } else {
+          // 方向改变，进入开仓组
+          groupIndex = 1;
+          currentSide = side;
+          openOrders.push(order);
+
+          // 如果openOrders的size和closeOrders的size一致，则不认为是配对的开平仓
+          if (openOrders[0].size === closeOrders[0].size) {
+            break;
+          }
+        }
+      } else if (groupIndex === 1) {
+        // 收集开仓组（第二组连续同方向）
+        if (currentSide === side) {
+          openOrders.push(order);
+        } else {
+          // 方向再次改变，停止（只要最近一对）
+          break;
+        }
+      }
+    }
+
+    // 验证：检查平仓和开仓的总size是否基本一致（允许小误差）
+    const closeSize = closeOrders.reduce((sum, o) => sum + parseFloat(o.size || '0'), 0);
+    const openSize = openOrders.reduce((sum, o) => sum + parseFloat(o.size || '0'), 0);
+
+    if (Math.abs(closeSize - openSize) > 0.001) {
+      log.warn(
+        `⚠️ 开平仓size不匹配: 平仓=${closeSize.toFixed(4)}, 开仓=${openSize.toFixed(4)}, ` +
+          `可能不是配对的开平仓`
+      );
+    }
+
+    return { openOrders, closeOrders };
+  }
+
+  /**
+   * 计算加权平均价
+   */
+  private calculateTotalPrice(orders: any[]): number {
+    let totalValue = 0;
+    let totalSize = 0;
+
+    for (const order of orders) {
+      const price = parseFloat(order.avg_fill_price || '0');
+      const size = parseFloat(order.size || '0');
+      totalValue += price * size;
+      totalSize += size;
+    }
+
+    return totalSize > 0 ? totalValue : 0;
+  }
+
+  /**
+   * 获取订单历史
+   *
+   * @param limit - 限制返回数量（默认10）
+   * @param orderId - 可选的订单ID过滤
+   */
+  async getOrderHistory(limit: number = 10): Promise<any[]> {
+    return this.withTokenRetry(async () => {
+      await this.ensureTokenValid();
+
+      const headers = {
+        Authorization: `Bearer ${this.account.jwtToken}`,
+      };
+
+      try {
+        const params = {
+          page_size: limit,
+        };
+
+        const response = await this.client.get('/orders-history', { headers, params });
+        return response.data.results || [];
+      } catch (error: any) {
+        log.error('获取 Paradex 订单历史失败', error);
+        throw error;
+      }
+    }, 1).catch(() => []);
   }
 
   /**

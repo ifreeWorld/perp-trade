@@ -80,7 +80,11 @@ async function main() {
       log.error('健康监控异常', error);
     });
 
-    // 7. 启动策略（主循环）
+    // 7. 发送启动通知
+    const { alertSystemStart } = await import('./utils/telegram-alert.js');
+    await alertSystemStart(config.symbol, config.strategy.orderSize);
+
+    // 8. 启动策略（主循环）
     log.info('启动对冲策略...');
     log.info('='.repeat(60));
     await strategy.run();
@@ -97,12 +101,6 @@ async function gracefulShutdown(signal: string) {
   log.info(`\n接收到 ${signal} 信号，正在关闭系统...`);
 
   try {
-    // 停止策略
-    if (strategy) {
-      log.info('停止对冲策略...');
-      strategy.stop();
-    }
-
     // 停止监控
     if (positionMonitor) {
       log.info('停止持仓监控...');
@@ -112,6 +110,12 @@ async function gracefulShutdown(signal: string) {
     if (healthMonitor) {
       log.info('停止健康监控...');
       healthMonitor.stop();
+    }
+
+    // 停止策略（会自动打印盈亏总结）
+    if (strategy) {
+      log.info('停止对冲策略...');
+      strategy.stop();
     }
 
     log.info('✅ 系统已安全关闭');
