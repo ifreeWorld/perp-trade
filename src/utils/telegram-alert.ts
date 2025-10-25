@@ -2,14 +2,17 @@
  * Telegram 告警工具模块
  */
 
-import axios from 'axios';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import log from './logger.js';
+
+const execAsync = promisify(exec);
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 /**
- * 发送 Telegram 告警消息
+ * 发送 Telegram 告警消息（使用curl，支持系统代理）
  */
 export async function sendTelegramAlert(message: string): Promise<void> {
   if (!BOT_TOKEN || !CHAT_ID) {
@@ -19,14 +22,32 @@ export async function sendTelegramAlert(message: string): Promise<void> {
 
   try {
     const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
-    await axios.post(url, {
-      chat_id: CHAT_ID,
-      text: `🚨 *对冲交易告警*\n\n${message}`,
-      parse_mode: 'Markdown',
-    });
-    log.info('✅ Telegram 告警已发送');
+    const text = `🚨 *对冲交易告警*\n\n${message}`;
+
+    // 转义单引号和特殊字符
+    const escapedText = text.replace(/'/g, "'\\''");
+    const escapedChatId = CHAT_ID.replace(/'/g, "'\\''");
+
+    // 使用curl发送请求，会自动使用系统代理
+    const curlCmd = `curl -s -X POST '${url}' \
+      -H 'Content-Type: application/json' \
+      -d '{"chat_id":"${escapedChatId}","text":"${escapedText}","parse_mode":"Markdown"}' \
+      --max-time 10`;
+
+    const { stdout, stderr } = await execAsync(curlCmd);
+
+    if (stderr) {
+      log.error('❌ Telegram curl stderr:', stderr);
+    }
+
+    const response = JSON.parse(stdout);
+    if (response.ok) {
+      log.info('✅ Telegram 告警已发送');
+    } else {
+      log.error('❌ Telegram API返回错误:', response);
+    }
   } catch (error: any) {
-    log.error('❌ Telegram 告警发送失败', error);
+    log.error('❌ Telegram 告警发送失败:', error.message);
   }
 }
 
